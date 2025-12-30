@@ -67,7 +67,7 @@ custom_css = """
 #output-area { border: 1px solid #e5e7eb; padding: 15px; border-radius: 8px; background-color: white; min-height: 200px; }
 """
 
-with gr.Blocks(title="YouTube QA Agent", css=custom_css, theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="YouTube QA Agent") as demo:
     gr.Markdown("# 📺 YouTube QA & Content Repurposing Agent")
     
     with gr.Row():
@@ -100,7 +100,7 @@ with gr.Blocks(title="YouTube QA Agent", css=custom_css, theme=gr.themes.Soft())
             gr.Markdown("### 💬 Chat with Video")
             chat_interface = gr.ChatInterface(
                 fn=chat_response,
-                chatbot=gr.Chatbot(height=450),
+                chatbot=gr.Chatbot(height=600),
                 textbox=gr.Textbox(placeholder="Ask a question about the video...", container=False, scale=7),
             )
 
@@ -121,4 +121,4 @@ with gr.Blocks(title="YouTube QA Agent", css=custom_css, theme=gr.themes.Soft())
 
 if __name__ == "__main__":
     #demo.launch(server_name="0.0.0.0", css=custom_css)
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(server_name="0.0.0.0", server_port=7860, css=custom_css, theme=gr.themes.Soft())
