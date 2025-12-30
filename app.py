@@ -1,11 +1,12 @@
 import gradio as gr
 from agent import YouTubeAgent
+import time
 
 agent = None
 
 def load_and_initialize(api_key, url):
     global agent
-    updates = [gr.update(interactive=False)] * 7 # 7 buttons
+    updates = [gr.update(interactive=False)] * 6 # 6 buttons
     if not api_key:
         return "⚠️ Please enter an OpenAI API Key.", *updates
     
@@ -22,12 +23,11 @@ def load_and_initialize(api_key, url):
         
         # Success message
         final_status = f"✅ Video Loaded!\n{vs_status}"
-        enable_updates = [gr.update(interactive=True)] * 7
+        enable_updates = [gr.update(interactive=True)] * 6
         return final_status, *enable_updates
     except Exception as e:
          return f"❌ Error: {str(e)}", *updates
 
-# Wrapper functions for tools to handle uninitialized state
 # Wrapper functions for tools to handle uninitialized state
 def run_tool(prompt):
     if not agent:
@@ -49,16 +49,63 @@ def generate_quiz():
 def extract_key_moments():
     return run_tool("Extract key moments from this video.")
 
-def translate_content():
-    return run_tool("Translate the summary of this video into Korean.")
-
 def search_video_info():
     return run_tool("Identify the main specific topic, entity, or person in this video and search the web for more background information about them.")
 
-def chat_response(message, history):
+def chat_response_streaming(message, history):
+    """Streaming chat response function"""
     if not agent:
-        return "⚠️ Please load a video first."
-    return agent.run(message)
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": "⚠️ Please load a video first."})
+        yield history, "", gr.update(visible=False)
+        return
+    
+    # Special handling for Rick and Morty easter egg
+    if "릭앤모티" in message.lower() or "릭 앤 모티" in message.lower() or "rick and morty" in message.lower():
+        import os
+        response_text = """🌌 **Rick and Morty Easter Egg 발견!** 🌌"""
+        
+        # Add user message first
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": ""})
+        yield history, "", gr.update(visible=False)
+        
+        # Stream the response character by character
+        partial_response = ""
+        for char in response_text:
+            partial_response += char
+            history[-1]["content"] = partial_response
+            yield history, "", gr.update(visible=False)
+            time.sleep(0.02)  # Small delay for streaming effect
+        
+        # Show image if exists
+        if os.path.exists("rick_morty.png"):
+            yield history, "", gr.update(visible=True, value="rick_morty.png")
+        else:
+            yield history, "", gr.update(visible=False)
+        return
+    
+    # Add user message first
+    history.append({"role": "user", "content": message})
+    history.append({"role": "assistant", "content": ""})
+    yield history, "", gr.update(visible=False)
+    
+    # Get response from agent
+    response = agent.run(message)
+    
+    # Stream the response while preserving line breaks
+    import re
+    # Split by words but preserve line breaks and spaces
+    tokens = re.findall(r'\S+|\s+', response)
+    partial_response = ""
+    
+    for token in tokens:
+        partial_response += token
+        history[-1]["content"] = partial_response
+        yield history, "", gr.update(visible=False)
+        # Only add delay for actual words, not spaces/newlines
+        if token.strip():
+            time.sleep(0.03)
 
 # Custom CSS for a cleaner look
 custom_css = """
@@ -87,7 +134,6 @@ with gr.Blocks(title="YouTube QA Agent") as demo:
             blog_btn = gr.Button("✍️ Write Blog Post", elem_id="tool-btn")
             quiz_btn = gr.Button("🎓 Generate Quiz", elem_id="tool-btn")
             moments_btn = gr.Button("⏱️ Key Moments", elem_id="tool-btn")
-            translate_btn = gr.Button("🇰🇷 Translate to Korean", elem_id="tool-btn")
             search_btn = gr.Button("🔎 Search Info", elem_id="tool-btn")
 
         # --- Right Main Area ---
@@ -98,17 +144,24 @@ with gr.Blocks(title="YouTube QA Agent") as demo:
                 tool_output = gr.Markdown("Select a tool from the left sidebar to see results here...", elem_id="output-area")
             
             gr.Markdown("### 💬 Chat with Video")
-            chat_interface = gr.ChatInterface(
-                fn=chat_response,
-                chatbot=gr.Chatbot(height=600),
-                textbox=gr.Textbox(placeholder="Ask a question about the video...", container=False, scale=7),
-            )
+            
+            # Custom chat interface that can handle images
+            with gr.Row():
+                with gr.Column(scale=4):
+                    chatbot = gr.Chatbot(height=600, label="Chat History")
+                with gr.Column(scale=1):
+                    # Image display area for Rick and Morty easter egg
+                    easter_egg_image = gr.Image(visible=False, label="Easter Egg!")
+            
+            with gr.Row():
+                msg = gr.Textbox(placeholder="Ask a question about the video...", container=False, scale=7, label="Message")
+                send_btn = gr.Button("Send", scale=1)
 
     # --- Interaction Logic ---
     load_btn.click(
         load_and_initialize,
         inputs=[api_key_input, url_input],
-        outputs=[status_output, summarize_btn, titles_btn, blog_btn, quiz_btn, moments_btn, translate_btn, search_btn]
+        outputs=[status_output, summarize_btn, titles_btn, blog_btn, quiz_btn, moments_btn, search_btn]
     )
 
     summarize_btn.click(summarize_video, outputs=tool_output)
@@ -116,8 +169,20 @@ with gr.Blocks(title="YouTube QA Agent") as demo:
     blog_btn.click(generate_blog, outputs=tool_output)
     quiz_btn.click(generate_quiz, outputs=tool_output)
     moments_btn.click(extract_key_moments, outputs=tool_output)
-    translate_btn.click(translate_content, outputs=tool_output)
     search_btn.click(search_video_info, outputs=tool_output)
+    
+    # Chat interface event handlers
+    send_btn.click(
+        chat_response_streaming,
+        inputs=[msg, chatbot],
+        outputs=[chatbot, msg, easter_egg_image]
+    )
+    
+    msg.submit(
+        chat_response_streaming,
+        inputs=[msg, chatbot],
+        outputs=[chatbot, msg, easter_egg_image]
+    )
 
 if __name__ == "__main__":
     #demo.launch(server_name="0.0.0.0", css=custom_css)

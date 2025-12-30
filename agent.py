@@ -1,6 +1,7 @@
 import os
 import json
 from typing import Optional
+from datetime import datetime
 from langchain_community.document_loaders import YoutubeLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -9,6 +10,7 @@ from langchain.tools import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import HumanMessage
 from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_core.documents import Document
 
 try:
     from langchain.chains.summarize import load_summarize_chain
@@ -110,35 +112,35 @@ def extract_key_moments(query: str = "") -> str:
     if not _agent_state["docs"]:
         return "비디오가 로드되지 않았습니다."
     
-    summary = summarize_video.invoke("")
-    prompt = PromptTemplate(
-        template="다음 비디오에서 핵심 순간들과 주요 내용을 한국어로 추출해주세요. 중요한 포인트들을 시간순으로 정리해주세요:\n\n{summary}",
-        input_variables=["summary"]
-    )
-    try:
-        from langchain.chains import LLMChain
-    except ImportError:
-        from langchain_classic.chains import LLMChain
-    chain = LLMChain(llm=_agent_state["llm"], prompt=prompt)
-    return chain.run(summary)
-
-@tool
-def translate_content(target_language: str = "Korean") -> str:
-    """Translates the video summary into the specified language. Default is Korean."""
-    if not _agent_state["docs"]:
-        return "No video loaded."
+    # Use the full transcript instead of summary for better timestamp extraction
+    full_content = _agent_state["docs"][0].page_content if _agent_state["docs"] else ""
     
-    summary = summarize_video.invoke("")
     prompt = PromptTemplate(
-        template=f"Translate the following text into {target_language}:\\n\\n{{text}}",
-        input_variables=["text"]
+        template="""다음 비디오 전체 내용에서 핵심 순간들과 주요 내용을 한국어로 추출해주세요. 
+각 핵심 순간마다 타임스탬프를 "0:30", "1:45", "3:20" 형식으로 포함하여 시간순으로 정리해주세요.
+
+비디오 내용:
+{content}
+
+다음 형식으로 답변해주세요:
+**0:00 - 시작 부분**
+- 주요 내용 설명
+
+**1:30 - 중간 부분**  
+- 주요 내용 설명
+
+**3:45 - 마무리 부분**
+- 주요 내용 설명
+
+핵심 순간들:""",
+        input_variables=["content"]
     )
     try:
         from langchain.chains import LLMChain
     except ImportError:
         from langchain_classic.chains import LLMChain
     chain = LLMChain(llm=_agent_state["llm"], prompt=prompt)
-    return chain.run(summary)
+    return chain.run(full_content[:4000])  # Limit content length for better processing
 
 @tool
 def search_web(query: str) -> str:
@@ -249,7 +251,33 @@ Return JSON:"""
         extracted_data = json.loads(content)
         
         if extracted_data:
+            # 1. 메모리에 저장 (기존 방식)
             _agent_state["conversation_memory"].update(extracted_data)
+            
+            # 2. 벡터 스토어에도 검색 가능한 형태로 추가
+            if _agent_state["vector_store"]:
+                memory_docs = []
+                for key, value in extracted_data.items():
+                    # 자연어 형태로 변환하여 벡터화
+                    if key == "channel":
+                        doc_content = f"이 비디오는 {value} 채널에서 제공됩니다."
+                    elif key == "speaker":
+                        doc_content = f"이 비디오의 발표자는 {value}입니다."
+                    elif key == "event":
+                        doc_content = f"이 비디오는 {value} 이벤트의 일부입니다."
+                    else:
+                        doc_content = f"이 비디오의 {key}는 {value}입니다."
+                    
+                    memory_doc = Document(
+                        page_content=doc_content,
+                        metadata={"type": "memory", "key": key, "value": value}
+                    )
+                    memory_docs.append(memory_doc)
+                
+                # 벡터 스토어에 추가
+                _agent_state["vector_store"].add_documents(memory_docs)
+                print(f"DEBUG: Added {len(memory_docs)} memory documents to vector store")
+            
             stored_keys = ", ".join(extracted_data.keys())
             return f"✓ 정보를 저장했습니다: {stored_keys}"
         else:
@@ -303,7 +331,7 @@ class YouTubeAgent:
     def __init__(self, openai_api_key):
         self.openai_api_key = openai_api_key
         os.environ["OPENAI_API_KEY"] = openai_api_key
-        self.llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo")
+        self.llm = ChatOpenAI(temperature=0.2, model_name="gpt-4o-mini")
         self.docs = []
         self.vector_store = None
         self.qa_chain = None
@@ -323,11 +351,72 @@ class YouTubeAgent:
             "blog": write_blog_post,
             "quiz": generate_quiz,
             "moments": extract_key_moments,
-            "translate": translate_content,
             "search": search_web,
             "memory": store_memory,
             "answer": answer_question
         }
+    
+    def save_metadata(self):
+        """Save conversation memory and context to JSON file."""
+        try:
+            db_path = f"db/{self.video_id}"
+            os.makedirs(db_path, exist_ok=True)
+            
+            metadata = {
+                "conversation_memory": self.conversation_memory,
+                "video_context": self.video_context,
+                "timestamp": datetime.now().isoformat(),
+                "video_id": self.video_id
+            }
+            
+            metadata_path = f"{db_path}/metadata.json"
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            
+            print(f"DEBUG: Saved metadata to {metadata_path}")
+        except Exception as e:
+            print(f"Warning: Could not save metadata: {e}")
+    
+    def load_metadata(self):
+        """Load conversation memory and context from JSON file."""
+        try:
+            metadata_path = f"db/{self.video_id}/metadata.json"
+            if os.path.exists(metadata_path):
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+                
+                self.conversation_memory = metadata.get("conversation_memory", {})
+                saved_context = metadata.get("video_context", "")
+                
+                # 기존 컨텍스트와 병합
+                if saved_context and saved_context != self.video_context:
+                    self.video_context = saved_context
+                
+                print(f"DEBUG: Loaded metadata from {metadata_path}")
+                print(f"DEBUG: Loaded conversation memory: {self.conversation_memory}")
+                
+                # 글로벌 상태 업데이트
+                _agent_state["conversation_memory"] = self.conversation_memory
+                _agent_state["video_context"] = self.video_context
+                
+                return True
+        except Exception as e:
+            print(f"Warning: Could not load metadata: {e}")
+        
+        return False
+    
+    def add_context_to_vector_store(self, summary):
+        """Add context summary to vector store for semantic search."""
+        if self.vector_store and summary:
+            try:
+                context_doc = Document(
+                    page_content=f"비디오 요약: {summary}",
+                    metadata={"type": "context_summary"}
+                )
+                self.vector_store.add_documents([context_doc])
+                print("DEBUG: Added context summary to vector store")
+            except Exception as e:
+                print(f"Warning: Could not add context to vector store: {e}")
     
     def load_video(self, url):
         """Loads the video transcript."""
@@ -370,12 +459,17 @@ class YouTubeAgent:
             return "처리할 문서가 없습니다. 먼저 비디오를 로드해주세요."
         
         db_path = f"db/{self.video_id}"
+        vector_store_loaded = False
+        
+        # 1. 메타데이터 로드 (JSON)
+        metadata_loaded = self.load_metadata()
         
         if os.path.exists(db_path):
             try:
                 embeddings = OpenAIEmbeddings()
                 self.vector_store = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
                 print(f"DEBUG: Loaded existing vector store from {db_path}")
+                vector_store_loaded = True
             except Exception as e:
                 print(f"Warning: Could not load local index: {e}. Recreating.")
         
@@ -412,23 +506,60 @@ class YouTubeAgent:
             chain_type_kwargs={"prompt": korean_qa_prompt}
         )
         
-        # Generate context summary in Korean
+        # 2. Generate and add context summary to vector store
         if "Summary:" not in self.video_context:
             try:
                 brief_content = self.docs[0].page_content[:3000]
                 summary_prompt = f"다음 비디오 내용을 1-2문장으로 한국어로 요약해주세요:\n\n{brief_content}"
                 context_summary = self.llm.invoke([HumanMessage(content=summary_prompt)]).content
                 self.video_context += f"\nSummary: {context_summary}"
+                
+                # Add context summary to vector store for semantic search
+                self.add_context_to_vector_store(context_summary)
                 print(f"DEBUG: Generated context summary")
             except Exception as e:
                 print(f"Warning: Could not generate context summary: {e}")
+        
+        # 3. Add existing conversation memory to vector store (if loaded from JSON)
+        if metadata_loaded and self.conversation_memory:
+            try:
+                memory_docs = []
+                for key, value in self.conversation_memory.items():
+                    if key == "channel":
+                        doc_content = f"이 비디오는 {value} 채널에서 제공됩니다."
+                    elif key == "speaker":
+                        doc_content = f"이 비디오의 발표자는 {value}입니다."
+                    elif key == "event":
+                        doc_content = f"이 비디오는 {value} 이벤트의 일부입니다."
+                    else:
+                        doc_content = f"이 비디오의 {key}는 {value}입니다."
+                    
+                    memory_doc = Document(
+                        page_content=doc_content,
+                        metadata={"type": "memory", "key": key, "value": value}
+                    )
+                    memory_docs.append(memory_doc)
+                
+                if memory_docs:
+                    self.vector_store.add_documents(memory_docs)
+                    print(f"DEBUG: Added {len(memory_docs)} existing memory documents to vector store")
+            except Exception as e:
+                print(f"Warning: Could not add existing memory to vector store: {e}")
         
         # Update global state
         _agent_state["vector_store"] = self.vector_store
         _agent_state["qa_chain"] = self.qa_chain
         _agent_state["video_context"] = self.video_context
+        _agent_state["conversation_memory"] = self.conversation_memory
         
-        return "벡터 스토어가 성공적으로 생성/로드되었습니다."
+        # 4. Save metadata (JSON)
+        self.save_metadata()
+        
+        # Return different messages based on whether vector store was loaded or created
+        if vector_store_loaded:
+            return "📂 기존 벡터 스토어를 로드했습니다."
+        else:
+            return "🔧 새로운 벡터 스토어를 생성했습니다."
 
     def run(self, query):
         """Simple routing-based agent without complex agent framework."""
@@ -511,8 +642,6 @@ Return JSON:"""
             return generate_quiz.invoke("")
         elif any(word in query_lower for word in ['핵심', '중요', 'key', 'moments', 'highlights']):
             return extract_key_moments.invoke("")
-        elif any(word in query_lower for word in ['번역', 'translate', '한국어']):
-            return translate_content.invoke("Korean")
         elif any(word in query_lower for word in ['검색', 'search', '찾아', '기사', '뉴스', '관련', '출처']):
             # Don't modify the original query, just use it as is for search
             print(f"DEBUG: Search triggered by query: {query}")
@@ -539,9 +668,15 @@ Return JSON:"""
                         search_query = f"{title} 관련 기사" if title else "검색할 내용을 구체적으로 알려주세요."
             
             if search_query and search_query != "검색할 내용을 구체적으로 알려주세요.":
-                return search_web.invoke(search_query)
+                result = search_web.invoke(search_query)
+                # Save metadata after any interaction
+                self.save_metadata()
+                return result
             else:
                 return "검색할 내용을 구체적으로 알려주세요."
         else:
             # Default to answering questions about the video
-            return answer_question.invoke(query)
+            result = answer_question.invoke(query)
+            # Save metadata after any interaction
+            self.save_metadata()
+            return result

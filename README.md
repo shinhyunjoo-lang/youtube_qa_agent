@@ -1,14 +1,134 @@
-# YouTube QA Agent
+# 📺 YouTube QA & Content Repurposing Agent
 
-A simple AI agent that provides summaries of YouTube videos and answers questions based on the video content.
+AI 기반 YouTube 비디오 분석 및 콘텐츠 재활용 도구입니다. 비디오 내용을 분석하고, 질문에 답변하며, 다양한 형태의 콘텐츠로 재가공할 수 있습니다.
 
-## Features
-- **Video Summary**: detailed summary of the provided YouTube video.
-- **Q&A Agent**: Ask questions about the video contents and get answers.
-- **UI**: Interactive web interface via Gradio.
-- **Tech Stack**: LangChain, Gradio, OpenAI.
+## ✨ 주요 기능
 
-## Setup
-1. Clone the repository.
-2. Install dependencies: `pip install -r requirements.txt`
-3. Run the app: `python app.py`
+### 🎯 **콘텐츠 분석 도구**
+- **📝 비디오 요약**: 전체 비디오 내용의 상세한 한국어 요약
+- **💡 제목 생성**: 매력적인 한국어 제목 5개 자동 생성
+- **✍️ 블로그 포스트**: 비디오 기반 완전한 블로그 글 작성
+- **🎓 퀴즈 생성**: 비디오 내용 기반 객관식 퀴즈 생성
+- **⏱️ 핵심 순간**: 타임스탬프와 함께 주요 내용 추출
+- **🔎 웹 검색**: 비디오 관련 추가 정보 및 기사 검색
+
+### 💬 **지능형 채팅**
+- **실시간 스트리밍**: 답변이 단어별로 실시간 표시
+- **자연어 질문**: 비디오 내용에 대한 자유로운 질문 가능
+- **컨텍스트 이해**: 이전 대화 내용을 기억하여 연속적인 대화 지원
+
+### 🧠 **하이브리드 장기 기억 시스템**
+- **벡터 스토어 (FAISS)**: 비디오 내용의 의미적 검색 및 영구 저장
+- **대화 메모리**: 사용자가 제공한 추가 정보 기억 (채널명, 발표자 등)
+- **메타데이터 관리**: JSON 기반 구조화된 정보 저장
+- **영구 보존**: 앱 재시작 후에도 모든 정보 유지
+
+### 🎨 **사용자 경험**
+- **직관적 UI**: Gradio 기반 깔끔한 웹 인터페이스
+- **반응형 디자인**: 도구 영역과 채팅 영역 분리
+- **실시간 피드백**: 벡터 스토어 생성/로드 상태 표시
+
+## 🏗️ 기술 스택
+
+- **AI/ML**: OpenAI GPT-4o-mini, LangChain
+- **벡터 DB**: FAISS (Facebook AI Similarity Search)
+- **UI**: Gradio with Soft theme
+- **검색**: DuckDuckGo Search
+- **언어**: Python 3.8+
+
+## 🚀 설치 및 실행
+
+### 1. 저장소 클론
+```bash
+git clone <repository-url>
+cd youtube_qa_agent
+```
+
+### 2. 가상환경 설정 (권장)
+```bash
+python -m venv venv
+source venv/bin/activate  # macOS/Linux
+# 또는
+venv\Scripts\activate     # Windows
+```
+
+### 3. 의존성 설치
+```bash
+pip install -r requirements.txt
+```
+
+### 4. 앱 실행
+```bash
+python app.py
+```
+
+### 5. 브라우저에서 접속
+```
+http://localhost:7860
+```
+
+## 📖 사용 방법
+
+### 기본 사용법
+1. **OpenAI API Key** 입력
+2. **YouTube URL** 입력
+3. **🚀 Load Video** 클릭
+4. 좌측 도구들을 사용하거나 채팅으로 질문
+
+### 고급 기능
+- **정보 저장**: "이 비디오는 AWS Events 채널에 올라왔어"
+- **정보 조회**: "어디 채널에 올라왔니?"
+
+## 💾 데이터 저장 구조
+
+```
+db/
+├── {video_id}/
+│   ├── index.faiss        # 벡터 인덱스 (비디오 내용 + 메모리)
+│   ├── index.pkl          # 벡터 메타데이터
+│   └── metadata.json      # 대화 메모리 + 컨텍스트 요약
+```
+
+## 🔧 주요 컴포넌트
+
+### YouTubeAgent
+- 비디오 로드 및 처리
+- 벡터 스토어 관리
+- 하이브리드 메모리 시스템
+
+### 도구 시스템
+- `@tool` 데코레이터 기반 모듈화
+- LangChain 체인 활용
+- 한국어 최적화 프롬프트
+
+### 메모리 시스템
+- **JSON**: 빠른 구조화된 데이터 접근
+- **벡터 DB**: 의미적 검색 및 유사도 기반 검색
+- **자동 동기화**: 두 시스템 간 데이터 일관성 유지
+
+## 🎯 사용 사례
+
+- **콘텐츠 크리에이터**: 비디오 기반 블로그, 제목, 요약 생성
+- **교육자**: 강의 비디오 기반 퀴즈 및 핵심 내용 추출
+- **연구자**: 비디오 내용 분석 및 관련 자료 검색
+- **마케터**: 비디오 콘텐츠 재활용 및 다양한 형태로 변환
+
+## 🔮 향후 계획
+
+- [ ] 다중 비디오 동시 분석
+- [ ] 비디오 시리즈 연관성 분석
+- [ ] 사용자 선호도 학습
+- [ ] 더 많은 언어 지원
+- [ ] API 엔드포인트 제공
+
+## 📝 라이선스
+
+MIT License
+
+## 🤝 기여
+
+Pull Request와 Issue는 언제나 환영합니다!
+
+---
+
+**Made with ❤️ using OpenAI GPT-4o-mini & LangChain**
