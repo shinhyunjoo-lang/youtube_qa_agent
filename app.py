@@ -5,8 +5,9 @@ agent = None
 
 def load_and_initialize(api_key, url):
     global agent
+    updates = [gr.update(interactive=False)] * 7 # 7 buttons
     if not api_key:
-        return "⚠️ Please enter an OpenAI API Key.", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+        return "⚠️ Please enter an OpenAI API Key.", *updates
     
     # Initialize basic agent just to check API key presence, logic handling in agent
     try:
@@ -14,36 +15,50 @@ def load_and_initialize(api_key, url):
         status = agent.load_video(url)
         
         if "Error" in status:
-            return f"❌ {status}", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+             return f"❌ {status}", *updates
         
         # Auto-create vector store
         vs_status = agent.create_vector_store()
         
         # Success message
         final_status = f"✅ Video Loaded!\n{vs_status}"
-        return final_status, gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)
+        enable_updates = [gr.update(interactive=True)] * 7
+        return final_status, *enable_updates
     except Exception as e:
-         return f"❌ Error: {str(e)}", gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False)
+         return f"❌ Error: {str(e)}", *updates
 
 # Wrapper functions for tools to handle uninitialized state
-def run_tool(tool_function):
+# Wrapper functions for tools to handle uninitialized state
+def run_tool(prompt):
     if not agent:
         return "⚠️ Agent not initialized. Please load a video first."
-    return tool_function()
+    return agent.run(prompt)
 
 def summarize_video():
-    return run_tool(lambda: agent.get_summary())
+    return run_tool("Please summarize this video.")
 
 def generate_titles():
-    return run_tool(lambda: agent.generate_titles())
+    return run_tool("Generate catchy titles for this video.")
 
 def generate_blog():
-    return run_tool(lambda: agent.generate_blog_post())
+    return run_tool("Write a blog post for this video.")
+
+def generate_quiz():
+    return run_tool("Create a quiz for this video.")
+
+def extract_key_moments():
+    return run_tool("Extract key moments from this video.")
+
+def translate_content():
+    return run_tool("Translate the summary of this video into Korean.")
+
+def search_video_info():
+    return run_tool("Identify the main specific topic, entity, or person in this video and search the web for more background information about them.")
 
 def chat_response(message, history):
     if not agent:
         return "⚠️ Please load a video first."
-    return agent.answer_question(message)
+    return agent.run(message)
 
 # Custom CSS for a cleaner look
 custom_css = """
@@ -70,6 +85,10 @@ with gr.Blocks(title="YouTube QA Agent", theme=gr.themes.Soft()) as demo:
             summarize_btn = gr.Button("📝 Summarize Video", elem_id="tool-btn")
             titles_btn = gr.Button("💡 Generate Titles", elem_id="tool-btn")
             blog_btn = gr.Button("✍️ Write Blog Post", elem_id="tool-btn")
+            quiz_btn = gr.Button("🎓 Generate Quiz", elem_id="tool-btn")
+            moments_btn = gr.Button("⏱️ Key Moments", elem_id="tool-btn")
+            translate_btn = gr.Button("🇰🇷 Translate to Korean", elem_id="tool-btn")
+            search_btn = gr.Button("🔎 Search Info", elem_id="tool-btn")
 
         # --- Right Main Area ---
         with gr.Column(scale=4):
@@ -89,12 +108,16 @@ with gr.Blocks(title="YouTube QA Agent", theme=gr.themes.Soft()) as demo:
     load_btn.click(
         load_and_initialize,
         inputs=[api_key_input, url_input],
-        outputs=[status_output, summarize_btn, titles_btn, blog_btn]
+        outputs=[status_output, summarize_btn, titles_btn, blog_btn, quiz_btn, moments_btn, translate_btn, search_btn]
     )
 
     summarize_btn.click(summarize_video, outputs=tool_output)
     titles_btn.click(generate_titles, outputs=tool_output)
     blog_btn.click(generate_blog, outputs=tool_output)
+    quiz_btn.click(generate_quiz, outputs=tool_output)
+    moments_btn.click(extract_key_moments, outputs=tool_output)
+    translate_btn.click(translate_content, outputs=tool_output)
+    search_btn.click(search_video_info, outputs=tool_output)
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", css=custom_css)

@@ -97,3 +97,5 @@ dmypy.json
 # editor
 .vscode
 .idea
+*.pem
+db/
