@@ -1,18 +1,204 @@
 import os
 import json
+from typing import Optional
 from langchain_community.document_loaders import YoutubeLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.tools import tool
+from langchain.agents import initialize_agent, AgentType
+from langchain_core.prompts import PromptTemplate
+from langchain_core.messages import HumanMessage
+from langchain_community.tools import DuckDuckGoSearchRun
+
 try:
     from langchain.chains.summarize import load_summarize_chain
     from langchain.chains import RetrievalQA
 except ImportError:
     from langchain_classic.chains.summarize import load_summarize_chain
     from langchain_classic.chains import RetrievalQA
-from langchain_core.prompts import PromptTemplate
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_community.tools import DuckDuckGoSearchRun
+
+# Global state for agent (will be set by YouTubeAgent instance)
+_agent_state = {
+    "llm": None,
+    "docs": [],
+    "vector_store": None,
+    "qa_chain": None,
+    "search": None,
+    "video_context": "",
+    "conversation_memory": {}
+}
+
+# ============================================================================
+# TOOL DEFINITIONS using @tool decorator
+# ============================================================================
+
+@tool
+def summarize_video(query: str = "") -> str:
+    """Summarizes the entire YouTube video content. Use this when user asks for a general summary or overview."""
+    if not _agent_state["docs"]:
+        return "No video loaded."
+    
+    try:
+        chain = load_summarize_chain(_agent_state["llm"], chain_type="map_reduce")
+        return chain.run(_agent_state["docs"])
+    except Exception as e:
+        return f"Error summarizing: {str(e)}"
+
+@tool
+def generate_titles(query: str = "") -> str:
+    """Generates catchy titles for the video. Use when user asks for title suggestions."""
+    if not _agent_state["docs"]:
+        return "No video loaded."
+    
+    summary = summarize_video.invoke("")
+    prompt = PromptTemplate(
+        template="Based on this video summary, generate 5 catchy titles:\n\n{summary}",
+        input_variables=["summary"]
+    )
+    try:
+        from langchain.chains import LLMChain
+    except ImportError:
+        from langchain_classic.chains import LLMChain
+    chain = LLMChain(llm=_agent_state["llm"], prompt=prompt)
+    return chain.run(summary)
+
+@tool
+def write_blog_post(query: str = "") -> str:
+    """Writes a blog post based on the video content. Use when user asks for a blog post or article."""
+    if not _agent_state["docs"]:
+        return "No video loaded."
+    
+    summary = summarize_video.invoke("")
+    prompt = PromptTemplate(
+        template="Write a detailed blog post based on this video summary:\n\n{summary}",
+        input_variables=["summary"]
+    )
+    try:
+        from langchain.chains import LLMChain
+    except ImportError:
+        from langchain_classic.chains import LLMChain
+    chain = LLMChain(llm=_agent_state["llm"], prompt=prompt)
+    return chain.run(summary)
+
+@tool
+def generate_quiz(query: str = "") -> str:
+    """Generates a multiple choice quiz based on video content. Use when user asks for a quiz or test."""
+    if not _agent_state["docs"]:
+        return "No video loaded."
+    
+    summary = summarize_video.invoke("")
+    prompt = PromptTemplate(
+        template="Create a 5-question multiple choice quiz based on this content:\n\n{summary}",
+        input_variables=["summary"]
+    )
+    try:
+        from langchain.chains import LLMChain
+    except ImportError:
+        from langchain_classic.chains import LLMChain
+    chain = LLMChain(llm=_agent_state["llm"], prompt=prompt)
+    return chain.run(summary)
+
+@tool
+def extract_key_moments(query: str = "") -> str:
+    """Extracts key moments, topics, and takeaways from the video. Use when user asks for highlights or main points."""
+    if not _agent_state["docs"]:
+        return "No video loaded."
+    
+    summary = summarize_video.invoke("")
+    prompt = PromptTemplate(
+        template="Extract the key moments and main takeaways from this video:\n\n{summary}",
+        input_variables=["summary"]
+    )
+    try:
+        from langchain.chains import LLMChain
+    except ImportError:
+        from langchain_classic.chains import LLMChain
+    chain = LLMChain(llm=_agent_state["llm"], prompt=prompt)
+    return chain.run(summary)
+
+@tool
+def translate_content(target_language: str = "Korean") -> str:
+    """Translates the video summary into the specified language. Default is Korean."""
+    if not _agent_state["docs"]:
+        return "No video loaded."
+    
+    summary = summarize_video.invoke("")
+    prompt = PromptTemplate(
+        template=f"Translate the following text into {target_language}:\\n\\n{{text}}",
+        input_variables=["text"]
+    )
+    try:
+        from langchain.chains import LLMChain
+    except ImportError:
+        from langchain_classic.chains import LLMChain
+    chain = LLMChain(llm=_agent_state["llm"], prompt=prompt)
+    return chain.run(summary)
+
+@tool
+def search_web(query: str) -> str:
+    """Searches the web for information NOT in the video. Use for current events, speaker background, or external facts. 
+    IMPORTANT: Query must include specific entities/names from the video context."""
+    if not _agent_state["search"]:
+        return "Web search not available."
+    
+    try:
+        return _agent_state["search"].invoke(query)
+    except Exception as e:
+        return f"Web search failed: {str(e)}"
+
+@tool
+def store_memory(user_message: str) -> str:
+    """Stores factual information provided by the user about the video (e.g., channel name, speaker name).
+    ONLY use when user provides NEW facts as STATEMENTS, NOT for questions."""
+    try:
+        extraction_prompt = f"""Analyze the following user message and extract any factual information they are providing about the video.
+Return ONLY a JSON object with key-value pairs. If no factual information is provided, return {{}}.
+
+Examples:
+- "이 비디오는 AWS Events 채널에 올라왔어" → {{"channel": "AWS Events"}}
+- "발표자는 John이야" → {{"speaker": "John"}}
+- "이건 re:Invent 2024 세션이야" → {{"event": "re:Invent 2024"}}
+
+User message: {user_message}
+
+Return JSON:"""
+        
+        response = _agent_state["llm"].invoke([HumanMessage(content=extraction_prompt)])
+        content = response.content.strip()
+        
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].strip()
+        
+        extracted_data = json.loads(content)
+        
+        if extracted_data:
+            _agent_state["conversation_memory"].update(extracted_data)
+            stored_keys = ", ".join(extracted_data.keys())
+            return f"✓ 정보를 저장했습니다: {stored_keys}"
+        else:
+            return "저장할 새로운 정보가 없습니다."
+            
+    except Exception as e:
+        return f"메모리 저장 중 오류: {str(e)}"
+
+@tool
+def answer_question(question: str) -> str:
+    """Answers specific questions about the video content using the transcript. 
+    Use for detailed questions about what was said in the video."""
+    if not _agent_state["qa_chain"]:
+        return "Vector store not initialized. Please reload video."
+    
+    try:
+        return _agent_state["qa_chain"].run(question)
+    except Exception as e:
+        return f"Error answering question: {str(e)}"
+
+# ============================================================================
+# YOUTUBE AGENT CLASS
+# ============================================================================
 
 class YouTubeAgent:
     def __init__(self, openai_api_key):
@@ -24,12 +210,81 @@ class YouTubeAgent:
         self.qa_chain = None
         self.search = DuckDuckGoSearchRun()
         self.video_context = ""
-        self.conversation_memory = {}  # Store user-provided facts
+        self.conversation_memory = {}
+        self.video_id = ""
+        
+        # Update global state
+        _agent_state["llm"] = self.llm
+        _agent_state["search"] = self.search
+        
+        # Create agent with tools
+        self.tools = [
+            summarize_video,
+            generate_titles,
+            write_blog_post,
+            generate_quiz,
+            extract_key_moments,
+            translate_content,
+            search_web,
+            store_memory,
+            answer_question
+        ]
+        
+        # Create ReAct agent
+        self.agent = None
+        self.agent_executor = None
+        self._setup_agent()
+    
+    def _setup_agent(self):
+        """Sets up the ReAct agent with tools."""
+        prompt_template = """You are a helpful YouTube video analysis assistant.
 
+Current Video Context: {video_context}
+User-Provided Information (Memory): {memory}
+
+You have access to the following tools:
+
+{tools}
+
+Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+IMPORTANT RULES:
+- If user is asking about stored information in Memory, answer directly without using tools
+- For WebSearch, ALWAYS include specific entities/names from Video Context in the query
+- For store_memory, ONLY use when user provides STATEMENTS with new facts, NOT for questions
+- If user message contains ?, 뭐, 무엇, 어디, 누구, DO NOT use store_memory
+
+Begin!
+
+Question: {input}
+Thought: {agent_scratchpad}"""
+
+        prompt = PromptTemplate(
+            template=prompt_template,
+            input_variables=["input", "agent_scratchpad", "video_context", "memory", "tools", "tool_names"]
+        )
+        
+        self.agent = create_react_agent(self.llm, self.tools, prompt)
+        self.agent_executor = AgentExecutor(
+            agent=self.agent,
+            tools=self.tools,
+            verbose=True,
+            handle_parsing_errors=True,
+            max_iterations=5
+        )
+    
     def load_video(self, url):
         """Loads the video transcript."""
         try:
-            # reset state
             self.docs = []
             self.vector_store = None
             self.qa_chain = None
@@ -41,22 +296,22 @@ class YouTubeAgent:
             if not self.docs:
                 return "Error: No transcript found for this video. Please check if the video has English or Korean captions."
                 
-            # Fallback for title since add_video_info=False doesn't fetch it
             title = self.docs[0].metadata.get('title', 'YouTube Video')
             self.docs[0].metadata['title'] = title
             self.video_context = f"Video Title: {title}"
             
-            # Extract video ID for persistence (supports multiple URL formats)
+            # Extract video ID
             if "v=" in url:
-                # Standard format: youtube.com/watch?v=VIDEO_ID
                 self.video_id = url.split("v=")[1].split("&")[0]
             elif "youtu.be/" in url:
-                # Short format: youtu.be/VIDEO_ID
                 self.video_id = url.split("youtu.be/")[1].split("?")[0]
             else:
-                # Fallback: use hash of URL
                 import hashlib
                 self.video_id = hashlib.md5(url.encode()).hexdigest()[:12]
+            
+            # Update global state
+            _agent_state["docs"] = self.docs
+            _agent_state["video_context"] = self.video_context
                 
             return f"Successfully loaded video: {title}"
         except Exception as e:
@@ -69,7 +324,6 @@ class YouTubeAgent:
         
         db_path = f"db/{self.video_id}"
         
-        # Check if index exists locally
         if os.path.exists(db_path):
             try:
                 embeddings = OpenAIEmbeddings()
@@ -87,17 +341,15 @@ class YouTubeAgent:
             self.vector_store.save_local(db_path)
             print(f"DEBUG: Saved new vector store to {db_path}")
         
-        # Initialize QA chain
         self.qa_chain = RetrievalQA.from_chain_type(
             llm=self.llm,
             chain_type="stuff",
             retriever=self.vector_store.as_retriever()
         )
         
-        # Generate brief context summary if not already done
+        # Generate context summary
         if "Summary:" not in self.video_context:
             try:
-                # Get a very brief summary for context (first 3000 chars)
                 brief_content = self.docs[0].page_content[:3000]
                 summary_prompt = f"In 1-2 sentences, what is this video about?\n\n{brief_content}"
                 context_summary = self.llm.invoke([HumanMessage(content=summary_prompt)]).content
@@ -106,159 +358,19 @@ class YouTubeAgent:
             except Exception as e:
                 print(f"Warning: Could not generate context summary: {e}")
         
+        # Update global state
+        _agent_state["vector_store"] = self.vector_store
+        _agent_state["qa_chain"] = self.qa_chain
+        _agent_state["video_context"] = self.video_context
+        
         return "Vector store created/loaded successfully."
 
-    def _get_summary_tool(self):
-        """Internal method for summary tool."""
-        if not self.docs:
-            return "No documents to summarize."
-        
-        chain = load_summarize_chain(self.llm, chain_type="stuff")
-        try:
-            return chain.run(self.docs)
-        except Exception as e:
-            # Fallback for long videos
-            chain = load_summarize_chain(self.llm, chain_type="map_reduce")
-            return chain.run(self.docs)
-
-    def _generate_titles_tool(self):
-        """Internal method for title generation tool."""
-        if not self.docs:
-            return "No documents available."
-        
-        prompt = PromptTemplate(
-            template="Based on the following content, suggest 5 catchy YouTube titles:\n\n{text}",
-            input_variables=["text"]
-        )
-        chain = load_summarize_chain(self.llm, chain_type="stuff", prompt=prompt)
-        try:
-            return chain.run(self.docs[:1]) 
-        except:
-             return "Content too long for title generation."
-
-    def _generate_blog_post_tool(self):
-        """Internal method for blog post tool."""
-        if not self.docs:
-            return "No documents available."
-        
-        prompt = PromptTemplate(
-            template="You are a professional technical writer. Create a well-structured blog post based on the following video transcript. Include a catchy title, introduction, key points, and conclusion.\n\n{text}",
-            input_variables=["text"]
-        )
-        try:
-            from langchain.chains import LLMChain
-        except ImportError:
-            from langchain_classic.chains import LLMChain
-        chain = LLMChain(llm=self.llm, prompt=prompt)
-        
-        limit = 12000 
-        content = self.docs[0].page_content[:limit] 
-        return chain.run(content)
-
-    def _generate_quiz_tool(self):
-        """Internal method for quiz generation."""
-        if not self.docs:
-            return "No documents available."
-            
-        prompt = PromptTemplate(
-            template="Based on the following video content, generate a 5-question multiple choice quiz. For each question, provide 4 options and indicate the correct answer.\n\n{text}",
-            input_variables=["text"]
-        )
-        try:
-            from langchain.chains import LLMChain
-        except ImportError:
-            from langchain_classic.chains import LLMChain
-        chain = LLMChain(llm=self.llm, prompt=prompt)
-        # Use first chunk or map reduce if needed. For quiz, first chunk might be enough if short, but better to use summary? 
-        # using first 12000 chars roughly to capture main content
-        return chain.run(self.docs[0].page_content[:12000])
-
-    def _extract_key_moments_tool(self):
-        """Internal method for key moments extraction."""
-        if not self.docs:
-            return "No documents available."
-            
-        prompt = PromptTemplate(
-            template="Identify 5-7 key moments or takeaways from the following video transcript. Use bullet points with a brief description for each.\n\n{text}",
-            input_variables=["text"]
-        )
-        chain = load_summarize_chain(self.llm, chain_type="stuff", prompt=prompt)
-        try:
-            return chain.run(self.docs)
-        except:
-            return "Content too long for key moments extraction. Try summarizing first."
-
-    def _translate_content_tool(self, target_language="Korean"):
-        """Internal method for translating summary/content."""
-        if not self.docs:
-            return "No documents available."
-            
-        # First get a summary to translate (translating whole transcript is too heavy)
-        summary = self._get_summary_tool()
-        
-        prompt = PromptTemplate(
-            template=f"Translate the following text into {target_language}:\n\n{{text}}",
-            input_variables=["text"]
-        )
-        try:
-            from langchain.chains import LLMChain
-        except ImportError:
-            from langchain_classic.chains import LLMChain
-        chain = LLMChain(llm=self.llm, prompt=prompt)
-        return chain.run(summary)
-
-    def _web_search_tool(self, query):
-        """Internal method for web search."""
-        try:
-            return self.search.invoke(query)
-        except Exception as e:
-            return f"Web search failed: {str(e)}"
-
-    def _extract_and_store_memory_tool(self, user_message):
-        """Extract and store factual information from user message."""
-        try:
-            extraction_prompt = f"""Analyze the following user message and extract any factual information they are providing about the video.
-Return ONLY a JSON object with key-value pairs. If no factual information is provided, return {{}}.
-
-Examples:
-- "이 비디오는 AWS Events 채널에 올라왔어" → {{"channel": "AWS Events"}}
-- "발표자는 John이야" → {{"speaker": "John"}}
-- "이건 re:Invent 2024 세션이야" → {{"event": "re:Invent 2024"}}
-- "Lambda와 DynamoDB를 다루는 내용이야" → {{"topics": ["Lambda", "DynamoDB"]}}
-- "내 프로젝트 참고용으로 봤어" → {{"purpose": "프로젝트 참고용"}}
-
-User message: {user_message}
-
-Return JSON:"""
-            
-            response = self.llm.invoke([HumanMessage(content=extraction_prompt)])
-            content = response.content.strip()
-            
-            # Clean up markdown code blocks
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].strip()
-            
-            extracted_data = json.loads(content)
-            
-            if extracted_data:
-                # Update conversation memory
-                self.conversation_memory.update(extracted_data)
-                stored_keys = ", ".join(extracted_data.keys())
-                return f"✓ 정보를 저장했습니다: {stored_keys}"
-            else:
-                return "저장할 새로운 정보가 없습니다."
-                
-        except Exception as e:
-            return f"메모리 저장 중 오류: {str(e)}"
-
     def run(self, query):
-        """Entry point for the agent. Uses a custom router to select tools."""
+        """Entry point for the agent using AgentExecutor."""
         if not self.docs:
-             return "Please load a video first."
-
-        # Pre-check: If user is asking about stored information, answer directly from memory
+            return "Please load a video first."
+        
+        # Pre-check: answer from memory if applicable
         if self.conversation_memory and any(keyword in query.lower() for keyword in ['뭐', '무엇', '어떤', '누구', 'what', 'who', 'which']):
             try:
                 memory_check_prompt = f"""User has stored the following information:
@@ -278,96 +390,18 @@ Answer:"""
                     return f"💾 저장된 정보: {answer}"
             except Exception as e:
                 print(f"Memory check error: {e}")
-
-        # 1. Select Tool
-        # Format memory for display
-        memory_str = json.dumps(self.conversation_memory, ensure_ascii=False, indent=2) if self.conversation_memory else "None"
         
-        system_prompt = f"""You are a helper agent for a YouTube video Q&A system.
-Current Video Context: {self.video_context}
-User-Provided Information (Memory): {memory_str}
-
-IMPORTANT: When generating tool_input, ALWAYS use specific information from the Current Video Context above.
-
-You have access to the following tools:
-1. Summarizer: use ONLY when the user asks for a general summary, overview, or "what is this video about?". DO NOT use for specific questions.
-2. TitleGenerator: Generates catchy titles for the video.
-3. BlogWriter: Writes a blog post based on the video.
-4. QuizGenerator: Generates a multiple choice quiz based on the video.
-5. KeyMoments: Extracts key moments, topics, or takeaways from the video.
-6. Translator: Translates the video summary or content into Korean (or user specified language).
-7. WebSearch: Searches the web for current events, facts, or information NOT present in the video (e.g., "who is the speaker?", "latest news about X").
-   - CRITICAL: For WebSearch, extract specific entities, names, or topics from the Video Context and include them in the search query.
-   - BAD: "YouTube Video channel name", "this video topic"
-   - GOOD: "[Specific Topic from Summary] latest updates", "[Speaker Name] background", "[Company/Product Name] information"
-8. MemoryStore: ONLY when user provides NEW factual information as a STATEMENT (e.g., "이 채널은 AWS Events야", "발표자는 John이야").
-   - DO NOT use for questions (e.g., "채널이 뭐야?", "어디 채널이야?")
-   - DO NOT use if user is asking about already stored information
-   - tool_input should be the user's original message
-9. VideoQA: Answers specific questions about the video content, such as "explain the conclusion", "what did the speaker say about X?", or "details about the intro".
-
-CRITICAL DECISION LOGIC:
-- If user message is a QUESTION (contains ?, 뭐, 무엇, 어디, 누구, 언제, 왜, 어떻게), DO NOT use MemoryStore
-- If user message is a STATEMENT providing new facts, use MemoryStore
-- If user is asking about stored information, check User-Provided Information first and answer directly without using tools
-
-Your task is to decide which tool to use based on the user's query.
-Return your response in JSON format: {{"tool": "TOOL_NAME", "tool_input": "INPUT_FOR_TOOL"}}
-- For Summarizer, TitleGenerator, BlogWriter, QuizGenerator, KeyMoments, Translator: tool_input can be empty or capture specific instructions.
-- For WebSearch: tool_input MUST be a specific search query using entities/topics from the Video Context. Never use generic terms like "this video" or "the channel".
-- For MemoryStore: tool_input should be the user's original message.
-- For VideoQA: tool_input should be a standalone search query optimized to find the answer in the video transcript (e.g., "What is the conclusion of the video?", "Speaker's opinion on AI safety").
-"""
+        # Update global state before running agent
+        _agent_state["conversation_memory"] = self.conversation_memory
         
+        # Run agent
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=query)
-            ])
-            
-            # Simple parsing (robustness can be improved)
-            content = response.content
-            # Cleanup json potential markdown
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].strip()
-            
-            decision = json.loads(content)
-            tool = decision.get("tool")
-            tool_input = decision.get("tool_input")
-            
-            print(f"DEBUG: Agent decided to use tool: {tool}")
-            print(f"DEBUG: Tool input: {tool_input}")
-
-            if tool == "Summarizer":
-                return self._get_summary_tool()
-            elif tool == "TitleGenerator":
-                return self._generate_titles_tool()
-            elif tool == "BlogWriter":
-                return self._generate_blog_post_tool()
-            elif tool == "QuizGenerator":
-                return self._generate_quiz_tool()
-            elif tool == "KeyMoments":
-                return self._extract_key_moments_tool()
-            elif tool == "Translator":
-                return self._translate_content_tool()
-            elif tool == "WebSearch":
-                return self._web_search_tool(tool_input)
-            elif tool == "MemoryStore":
-                return self._extract_and_store_memory_tool(query)  # Use original query
-            elif tool == "VideoQA":
-                if not self.qa_chain:
-                     return "Vector store not initialized. Please reload video."
-                
-                # Fallback to original query if tool_input is empty, though prompt should handle it
-                search_query = tool_input if tool_input else query
-                return self.qa_chain.run(search_query)
-            else:
-                # Default to QA if unsure
-                if self.qa_chain:
-                    return self.qa_chain.run(query)
-                return "I'm not sure what tool to use."
-
+            memory_str = json.dumps(self.conversation_memory, ensure_ascii=False, indent=2) if self.conversation_memory else "None"
+            result = self.agent_executor.invoke({
+                "input": query,
+                "video_context": self.video_context,
+                "memory": memory_str
+            })
+            return result["output"]
         except Exception as e:
             return f"Agent Error: {str(e)}"
