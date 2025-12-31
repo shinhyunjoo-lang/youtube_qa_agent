@@ -27,7 +27,8 @@ _agent_state = {
     "qa_chain": None,
     "search": None,
     "video_context": "",
-    "conversation_memory": {}
+    "conversation_memory": {},
+    "video_info": {}
 }
 
 # ============================================================================
@@ -41,6 +42,8 @@ def summarize_video(query: str = "") -> str:
         return "비디오가 로드되지 않았습니다."
     
     try:
+        print(f"📝 [TOOL] 비디오 요약 생성 중...")
+        
         # Create a Korean-specific summarization prompt
         korean_prompt = PromptTemplate(
             template="다음 비디오 내용을 한국어로 요약해주세요. 주요 내용과 핵심 포인트를 포함해서 자세히 설명해주세요:\n\n{text}",
@@ -57,6 +60,8 @@ def generate_titles(query: str = "") -> str:
     """Generates catchy titles for the video. Use when user asks for title suggestions."""
     if not _agent_state["docs"]:
         return "비디오가 로드되지 않았습니다."
+    
+    print(f"🎯 [TOOL] 제목 생성 중...")
     
     summary = summarize_video.invoke("")
     prompt = PromptTemplate(
@@ -76,6 +81,8 @@ def write_blog_post(query: str = "") -> str:
     if not _agent_state["docs"]:
         return "비디오가 로드되지 않았습니다."
     
+    print(f"✍️ [TOOL] 블로그 포스트 작성 중...")
+    
     summary = summarize_video.invoke("")
     prompt = PromptTemplate(
         template="다음 비디오 요약을 바탕으로 상세한 한국어 블로그 포스트를 작성해주세요. 서론, 본론, 결론 구조로 작성해주세요:\n\n{summary}",
@@ -94,6 +101,8 @@ def generate_quiz(query: str = "") -> str:
     if not _agent_state["docs"]:
         return "비디오가 로드되지 않았습니다."
     
+    print(f"❓ [TOOL] 퀴즈 생성 중...")
+    
     summary = summarize_video.invoke("")
     prompt = PromptTemplate(
         template="다음 내용을 바탕으로 한국어로 5문항의 객관식 퀴즈를 만들어주세요. 각 문항마다 4개의 선택지와 정답을 포함해주세요:\n\n{summary}",
@@ -111,6 +120,8 @@ def extract_key_moments(query: str = "") -> str:
     """Extracts key moments, topics, and takeaways from the video. Use when user asks for highlights or main points."""
     if not _agent_state["docs"]:
         return "비디오가 로드되지 않았습니다."
+    
+    print(f"⭐ [TOOL] 핵심 순간 추출 중...")
     
     # Use the full transcript instead of summary for better timestamp extraction
     full_content = _agent_state["docs"][0].page_content if _agent_state["docs"] else ""
@@ -144,90 +155,166 @@ def extract_key_moments(query: str = "") -> str:
 
 @tool
 def search_web(query: str) -> str:
-    """Searches the web for information NOT in the video. Use for current events, speaker background, or external facts. 
-    IMPORTANT: Query must include specific entities/names from the video context."""
+    """Searches the web for information NOT in the video. Use for current events, speaker background, or external facts."""
     if not _agent_state["search"]:
         return "웹 검색을 사용할 수 없습니다."
     
     try:
-        # Get video context for better search
+        print(f"🔍 [TOOL] 웹 검색 실행 중...")
+        
+        # Get comprehensive video context
         video_context = _agent_state.get("video_context", "")
         conversation_memory = _agent_state.get("conversation_memory", {})
+        video_info = _agent_state.get("video_info", {})
         docs = _agent_state.get("docs", [])
         
-        # Extract key terms from video content for better search context
-        search_context_terms = []
+        # Extract detailed context from video content
+        search_context = []
         
-        # Get video title
-        if "Video Title: " in video_context:
-            title = video_context.split("Video Title: ")[1].split("\n")[0]
-            if title and title != "YouTube Video":
-                search_context_terms.append(f'"{title}"')
+        # 1. Get video title and author from video_info
+        video_title = video_info.get("title", "")
+        video_author = video_info.get("author", "")
         
-        # Add memory context
+        if video_title and video_title != "YouTube Video":
+            search_context.append(video_title)
+        if video_author:
+            search_context.append(video_author)
+        
+        # 2. Add stored memory context (channel, speaker, event info)
+        memory_context = []
         if conversation_memory:
             for key, value in conversation_memory.items():
-                if key == "channel":
-                    search_context_terms.append(f'"{value}"')
-                elif key == "speaker":
-                    search_context_terms.append(f'"{value}"')
-                elif key == "event":
-                    search_context_terms.append(f'"{value}"')
+                memory_context.append(f"{key}: {value}")
+                search_context.append(str(value))
         
-        # Extract key terms from video content (first 1000 characters)
+        # 3. Extract key entities from video content using LLM
+        video_entities = []
         if docs and len(docs) > 0:
-            content_sample = docs[0].page_content[:1000]
-            # Use LLM to extract key terms for search
-            key_terms_prompt = f"""다음 비디오 내용에서 검색에 유용한 핵심 키워드 3-5개를 추출해주세요. 
-회사명, 제품명, 기술명, 인물명 등을 우선적으로 추출하세요.
-키워드만 쉼표로 구분해서 답변해주세요.
+            content_sample = docs[0].page_content[:2000]  # Use more content for better context
+            
+            entity_extraction_prompt = f"""다음 비디오 내용에서 웹 검색에 유용한 핵심 엔티티들을 추출해주세요.
+다음 카테고리별로 추출하세요:
+- 회사명/조직명
+- 제품명/서비스명  
+- 기술명/플랫폼명
+- 인물명
+- 이벤트명/컨퍼런스명
+- 주요 키워드
 
 비디오 내용:
 {content_sample}
 
-키워드:"""
+각 카테고리별로 찾은 엔티티들을 쉼표로 구분하여 나열해주세요. 없으면 "없음"이라고 하세요.
+
+회사명/조직명:
+제품명/서비스명:
+기술명/플랫폼명:
+인물명:
+이벤트명/컨퍼런스명:
+주요 키워드:"""
             
-            key_terms_response = _agent_state["llm"].invoke([HumanMessage(content=key_terms_prompt)])
-            key_terms = key_terms_response.content.strip()
-            if key_terms and len(key_terms) > 5:
-                search_context_terms.append(key_terms)
+            try:
+                entity_response = _agent_state["llm"].invoke([HumanMessage(content=entity_extraction_prompt)])
+                entity_text = entity_response.content.strip()
+                
+                # Parse extracted entities
+                for line in entity_text.split('\n'):
+                    if ':' in line and '없음' not in line.lower():
+                        entities = line.split(':', 1)[1].strip()
+                        if entities and len(entities) > 3:
+                            video_entities.extend([e.strip() for e in entities.split(',') if e.strip()])
+                
+                # Add top entities to search context
+                search_context.extend(video_entities[:5])  # Top 5 entities
+                
+            except Exception as e:
+                print(f"Entity extraction error: {e}")
         
-        # Create enhanced search query
-        if search_context_terms:
-            enhanced_query = f"{query} {' '.join(search_context_terms)}"
+        # 4. Create intelligent search query
+        if not search_context:
+            return "🚫 검색할 구체적인 정보가 부족합니다. 비디오 내용을 더 구체적으로 분석한 후 다시 시도해주세요."
+        
+        # Build search query with context
+        context_terms = " ".join(search_context[:4])  # Use top 4 context terms
+        
+        # Smart query construction based on user intent
+        if any(word in query.lower() for word in ['관련', '더', '자세한', '설명', '정보']):
+            # User wants more detailed information about the video topic
+            final_query = f"{context_terms} 자세한 설명 최신 정보"
+        elif any(word in query.lower() for word in ['기사', '뉴스', '소식']):
+            # User wants news/articles
+            final_query = f"{context_terms} 뉴스 기사 최신"
+        elif any(word in query.lower() for word in ['배경', '역사', '소개']):
+            # User wants background information
+            final_query = f"{context_terms} 배경 소개 개요"
         else:
-            enhanced_query = query
+            # General search with context
+            final_query = f"{query} {context_terms}"
             
-        print(f"DEBUG: Original query: {query}")
-        print(f"DEBUG: Enhanced search query: {enhanced_query}")
+        print(f"🔍 검색어: {final_query}")
+        print(f"📋 추출된 컨텍스트: {', '.join(search_context[:5])}")
         
-        search_result = _agent_state["search"].invoke(enhanced_query)
+        # Perform web search
+        search_result = _agent_state["search"].invoke(final_query)
         
-        # Filter and contextualize search result
-        filter_prompt = f"""다음 검색 결과를 분석하여 현재 비디오와 관련된 내용만 선별하고 한국어로 번역/요약해주세요.
+        if not search_result or len(search_result.strip()) < 50:
+            return "🚫 관련 검색 결과를 찾을 수 없습니다. 다른 키워드로 시도해보세요."
+        
+        # Enhanced result filtering with video context
+        detailed_info_available = video_info.get('detailed_info_available', False)
+        
+        filter_prompt = f"""다음 웹 검색 결과를 분석하여 현재 로드된 비디오와 관련된 정보만 선별해주세요.
 
 현재 비디오 정보:
-- 제목: {video_context}
-- 사용자 제공 정보: {json.dumps(conversation_memory, ensure_ascii=False)}
-- 비디오 주요 내용: {content_sample[:500] if docs and len(docs) > 0 else '정보 없음'}
+- 제목: {video_title}"""
+        
+        if detailed_info_available:
+            filter_prompt += f"""
+- 채널/작성자: {video_author}
+- 조회수: {video_info.get('view_count', '정보 없음')}
+- 길이: {video_info.get('length', '정보 없음')}
+- 게시일: {video_info.get('publish_date', '정보 없음')}
+- 설명: {video_info.get('description', '')[:200]}..."""
+        else:
+            filter_prompt += "\n- 상세 정보: 기본 정보만 사용 가능"
+            
+        filter_prompt += f"""
+- 저장된 정보: {json.dumps(conversation_memory, ensure_ascii=False)}
+- 추출된 주요 엔티티: {', '.join(video_entities[:10])}
+- 사용자 질문: {query}
 
 검색 결과:
 {search_result}
 
-관련성이 높은 내용만 선별하여 한국어로 요약해주세요. 관련성이 낮은 내용은 제외하고, 
-현재 비디오와 직접적으로 연관된 기사나 정보만 포함해주세요:"""
+다음 기준으로 정보를 정리해주세요:
+1. 위 비디오 정보와 직접 관련된 내용만 선별
+2. 비디오에서 언급된 회사, 제품, 기술, 인물, 이벤트와 관련된 정보 우선
+3. 최신 정보 및 공식 발표 내용 포함
+4. 한국어로 명확하고 구체적으로 요약
+5. 관련 없는 일반적인 정보나 광고는 제외
+6. 출처나 날짜가 있다면 포함
+
+비디오와 관련된 구체적인 정보:"""
         
         response = _agent_state["llm"].invoke([HumanMessage(content=filter_prompt)])
-        return response.content
+        result = response.content.strip()
+        
+        if len(result) < 50 or "관련된 정보를 찾을 수 없" in result:
+            return f"🚫 '{video_title}'과 관련된 구체적인 웹 정보를 찾을 수 없습니다. 다른 검색어로 시도해보세요."
+            
+        return f"🌐 웹 검색 결과 ('{video_title}' 관련):\n\n{result}"
         
     except Exception as e:
-        return f"웹 검색 실패: {str(e)}"
+        print(f"❌ 웹 검색 오류: {str(e)}")
+        return f"웹 검색 중 오류가 발생했습니다: {str(e)}"
 
 @tool
 def store_memory(user_message: str) -> str:
     """Stores factual information provided by the user about the video (e.g., channel name, speaker name).
     ONLY use when user provides NEW facts as STATEMENTS, NOT for questions."""
     try:
+        print(f"💾 [TOOL] 메모리 저장 중...")
+        
         extraction_prompt = f"""Analyze the following user message and extract any factual information they are providing about the video.
 Return ONLY a JSON object with key-value pairs. If no factual information is provided, return {{}}.
 
@@ -294,6 +381,8 @@ def answer_question(question: str) -> str:
         return "벡터 스토어가 초기화되지 않았습니다. 비디오를 다시 로드해주세요."
     
     try:
+        print(f"🤔 [TOOL] 비디오 내용 질문 답변 중...")
+        
         # Create a Korean-specific QA prompt
         korean_qa_prompt = PromptTemplate(
             template="""다음 컨텍스트를 바탕으로 질문에 한국어로 답변해주세요. 답변은 정확하고 상세하게 해주세요.
@@ -338,6 +427,7 @@ class YouTubeAgent:
         self.search = DuckDuckGoSearchRun()
         self.video_context = ""
         self.conversation_memory = {}
+        self.video_info = {}
         self.video_id = ""
         
         # Update global state
@@ -357,14 +447,29 @@ class YouTubeAgent:
         }
     
     def save_metadata(self):
-        """Save conversation memory and context to JSON file."""
+        """Save conversation memory, context, and video info to JSON file."""
         try:
             db_path = f"db/{self.video_id}"
             os.makedirs(db_path, exist_ok=True)
             
+            # Extract video info from docs metadata if available
+            video_info = {}
+            if self.docs and len(self.docs) > 0:
+                doc_metadata = self.docs[0].metadata
+                video_info = {
+                    "title": doc_metadata.get("title", ""),
+                    "description": doc_metadata.get("description", ""),
+                    "view_count": doc_metadata.get("view_count", ""),
+                    "length": doc_metadata.get("length", ""),
+                    "author": doc_metadata.get("author", ""),
+                    "publish_date": doc_metadata.get("publish_date", ""),
+                    "upload_date": doc_metadata.get("upload_date", "")
+                }
+            
             metadata = {
                 "conversation_memory": self.conversation_memory,
                 "video_context": self.video_context,
+                "video_info": video_info,
                 "timestamp": datetime.now().isoformat(),
                 "video_id": self.video_id
             }
@@ -373,12 +478,12 @@ class YouTubeAgent:
             with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
             
-            print(f"DEBUG: Saved metadata to {metadata_path}")
+            print(f"DEBUG: Saved metadata with video info to {metadata_path}")
         except Exception as e:
             print(f"Warning: Could not save metadata: {e}")
     
     def load_metadata(self):
-        """Load conversation memory and context from JSON file."""
+        """Load conversation memory, context, and video info from JSON file."""
         try:
             metadata_path = f"db/{self.video_id}/metadata.json"
             if os.path.exists(metadata_path):
@@ -387,6 +492,7 @@ class YouTubeAgent:
                 
                 self.conversation_memory = metadata.get("conversation_memory", {})
                 saved_context = metadata.get("video_context", "")
+                self.video_info = metadata.get("video_info", {})
                 
                 # 기존 컨텍스트와 병합
                 if saved_context and saved_context != self.video_context:
@@ -394,10 +500,12 @@ class YouTubeAgent:
                 
                 print(f"DEBUG: Loaded metadata from {metadata_path}")
                 print(f"DEBUG: Loaded conversation memory: {self.conversation_memory}")
+                print(f"DEBUG: Loaded video info: {self.video_info}")
                 
                 # 글로벌 상태 업데이트
                 _agent_state["conversation_memory"] = self.conversation_memory
                 _agent_state["video_context"] = self.video_context
+                _agent_state["video_info"] = getattr(self, 'video_info', {})
                 
                 return True
         except Exception as e:
@@ -405,36 +513,151 @@ class YouTubeAgent:
         
         return False
     
-    def add_context_to_vector_store(self, summary):
-        """Add context summary to vector store for semantic search."""
-        if self.vector_store and summary:
+    def add_video_info_to_vector_store(self, video_info):
+        """Add video information to vector store for semantic search."""
+        if self.vector_store and video_info:
             try:
-                context_doc = Document(
-                    page_content=f"비디오 요약: {summary}",
-                    metadata={"type": "context_summary"}
-                )
-                self.vector_store.add_documents([context_doc])
-                print("DEBUG: Added context summary to vector store")
+                video_docs = []
+                
+                # Add title
+                if video_info.get("title"):
+                    title_doc = Document(
+                        page_content=f"비디오 제목: {video_info['title']}",
+                        metadata={"type": "video_info", "info_type": "title"}
+                    )
+                    video_docs.append(title_doc)
+                
+                # Add description
+                if video_info.get("description"):
+                    desc_doc = Document(
+                        page_content=f"비디오 설명: {video_info['description'][:500]}",  # Limit description length
+                        metadata={"type": "video_info", "info_type": "description"}
+                    )
+                    video_docs.append(desc_doc)
+                
+                # Add author/channel info
+                if video_info.get("author"):
+                    author_doc = Document(
+                        page_content=f"비디오 채널/작성자: {video_info['author']}",
+                        metadata={"type": "video_info", "info_type": "author"}
+                    )
+                    video_docs.append(author_doc)
+                
+                # Add view count and length info
+                stats_info = []
+                if video_info.get("view_count"):
+                    stats_info.append(f"조회수: {video_info['view_count']}")
+                if video_info.get("length"):
+                    stats_info.append(f"길이: {video_info['length']}")
+                if video_info.get("publish_date"):
+                    stats_info.append(f"게시일: {video_info['publish_date']}")
+                
+                if stats_info:
+                    stats_doc = Document(
+                        page_content=f"비디오 정보: {', '.join(stats_info)}",
+                        metadata={"type": "video_info", "info_type": "stats"}
+                    )
+                    video_docs.append(stats_doc)
+                
+                if video_docs:
+                    self.vector_store.add_documents(video_docs)
+                    print(f"DEBUG: Added {len(video_docs)} video info documents to vector store")
+                    
             except Exception as e:
-                print(f"Warning: Could not add context to vector store: {e}")
+                print(f"Warning: Could not add video info to vector store: {e}")
     
     def load_video(self, url):
-        """Loads the video transcript."""
+        """Loads the video transcript with detailed video information."""
         try:
             self.docs = []
             self.vector_store = None
             self.qa_chain = None
             self.video_context = ""
+            self.video_info = {}
 
-            loader = YoutubeLoader.from_youtube_url(url, add_video_info=False, language=["en", "en-US", "ko"])
-            self.docs = loader.load()
+            # First try with detailed info, fallback to basic if it fails
+            try:
+                print("🔄 비디오 상세 정보와 함께 로드 시도 중...")
+                loader = YoutubeLoader.from_youtube_url(url, add_video_info=True, language=["en", "en-US", "ko"])
+                self.docs = loader.load()
+                detailed_info_loaded = True
+                print("✅ 상세 정보 로드 성공")
+            except Exception as e:
+                print(f"⚠️ 상세 정보 로드 실패: {e}")
+                print("🔄 기본 정보로 재시도 중...")
+                loader = YoutubeLoader.from_youtube_url(url, add_video_info=False, language=["en", "en-US", "ko"])
+                self.docs = loader.load()
+                detailed_info_loaded = False
+                print("✅ 기본 정보 로드 성공")
             
             if not self.docs:
                 return "오류: 이 비디오의 자막을 찾을 수 없습니다. 영어 또는 한국어 자막이 있는지 확인해주세요."
+            
+            # Extract video information from metadata
+            doc_metadata = self.docs[0].metadata
+            print(f"DEBUG: Available metadata keys: {list(doc_metadata.keys())}")
+            print(f"DEBUG: Metadata content: {doc_metadata}")
+            
+            # Extract basic info that should always be available
+            title = doc_metadata.get('title', 'YouTube Video')
+            source = doc_metadata.get('source', '')
+            
+            # Extract detailed info if available
+            description = doc_metadata.get('description', '') if detailed_info_loaded else ''
+            author = doc_metadata.get('author', '') if detailed_info_loaded else ''
+            view_count = doc_metadata.get('view_count', '') if detailed_info_loaded else ''
+            length = doc_metadata.get('length', '') if detailed_info_loaded else ''
+            publish_date = doc_metadata.get('publish_date', '') if detailed_info_loaded else ''
+            upload_date = doc_metadata.get('upload_date', '') if detailed_info_loaded else ''
+            
+            # If basic info failed, try to extract from source URL or other fields
+            if title == 'YouTube Video' or not title:
+                # Try to get title from other metadata fields
+                for key in ['video_title', 'name', 'display_name']:
+                    if key in doc_metadata and doc_metadata[key]:
+                        title = doc_metadata[key]
+                        break
                 
-            title = self.docs[0].metadata.get('title', 'YouTube Video')
-            self.docs[0].metadata['title'] = title
-            self.video_context = f"Video Title: {title}"
+                # If still no title, extract video ID from URL for identification
+                if title == 'YouTube Video' or not title:
+                    if "v=" in url:
+                        video_id_from_url = url.split("v=")[1].split("&")[0]
+                        title = f"YouTube Video ({video_id_from_url})"
+                    elif "youtu.be/" in url:
+                        video_id_from_url = url.split("youtu.be/")[1].split("?")[0]
+                        title = f"YouTube Video ({video_id_from_url})"
+            
+            # Store video info
+            self.video_info = {
+                "title": title,
+                "description": description,
+                "author": author,
+                "view_count": view_count,
+                "length": length,
+                "publish_date": publish_date,
+                "upload_date": upload_date,
+                "source": source,
+                "detailed_info_available": detailed_info_loaded
+            }
+            
+            print(f"DEBUG: Extracted video info: {self.video_info}")
+            
+            # Create video context based on available information
+            context_parts = [f"Video Title: {title}"]
+            if author:
+                context_parts.append(f"Channel: {author}")
+            if view_count:
+                context_parts.append(f"Views: {view_count}")
+            if length:
+                context_parts.append(f"Length: {length}")
+            if publish_date:
+                context_parts.append(f"Published: {publish_date}")
+            if description and len(description) > 0:
+                # Add first 200 characters of description
+                desc_preview = description[:200] + "..." if len(description) > 200 else description
+                context_parts.append(f"Description: {desc_preview}")
+            
+            self.video_context = "\n".join(context_parts)
             
             # Extract video ID
             if "v=" in url:
@@ -448,8 +671,26 @@ class YouTubeAgent:
             # Update global state
             _agent_state["docs"] = self.docs
             _agent_state["video_context"] = self.video_context
+            _agent_state["video_info"] = self.video_info
+            
+            # Display loaded video info
+            info_display = [f"📺 비디오를 성공적으로 로드했습니다: {title}"]
+            
+            if detailed_info_loaded:
+                info_display.append("✅ 상세 정보 포함")
+                if author:
+                    info_display.append(f"📺 채널: {author}")
+                if view_count:
+                    info_display.append(f"👀 조회수: {view_count}")
+                if length:
+                    info_display.append(f"⏱️ 길이: {length}")
+                if publish_date:
+                    info_display.append(f"📅 게시일: {publish_date}")
+            else:
+                info_display.append("⚠️ 기본 정보만 로드됨 (상세 정보 로드 실패)")
                 
-            return f"비디오를 성공적으로 로드했습니다: {title}"
+            return "\n".join(info_display)
+            
         except Exception as e:
             return f"비디오 로드 중 오류가 발생했습니다: {str(e)}"
 
@@ -506,7 +747,22 @@ class YouTubeAgent:
             chain_type_kwargs={"prompt": korean_qa_prompt}
         )
         
-        # 2. Generate and add context summary to vector store
+        # 2. Add video information to vector store (for new vector stores)
+        if not vector_store_loaded and hasattr(self, 'video_info') and self.video_info:
+            # Only add detailed info if it was successfully loaded
+            if self.video_info.get('detailed_info_available', False):
+                self.add_video_info_to_vector_store(self.video_info)
+            else:
+                # Add basic title info to vector store
+                if self.video_info.get('title'):
+                    basic_info_doc = Document(
+                        page_content=f"비디오 제목: {self.video_info['title']}",
+                        metadata={"type": "video_info", "info_type": "title"}
+                    )
+                    self.vector_store.add_documents([basic_info_doc])
+                    print("DEBUG: Added basic video title to vector store")
+        
+        # 3. Generate and add context summary to vector store
         if "Summary:" not in self.video_context:
             try:
                 brief_content = self.docs[0].page_content[:3000]
@@ -520,7 +776,7 @@ class YouTubeAgent:
             except Exception as e:
                 print(f"Warning: Could not generate context summary: {e}")
         
-        # 3. Add existing conversation memory to vector store (if loaded from JSON)
+        # 4. Add existing conversation memory to vector store (if loaded from JSON)
         if metadata_loaded and self.conversation_memory:
             try:
                 memory_docs = []
@@ -552,7 +808,7 @@ class YouTubeAgent:
         _agent_state["video_context"] = self.video_context
         _agent_state["conversation_memory"] = self.conversation_memory
         
-        # 4. Save metadata (JSON)
+        # 5. Save metadata (JSON)
         self.save_metadata()
         
         # Return different messages based on whether vector store was loaded or created
@@ -566,9 +822,12 @@ class YouTubeAgent:
         if not self.docs:
             return "먼저 비디오를 로드해주세요."
         
+        print(f"\n🎯 사용자 질문: {query}")
+        
         # Pre-check: answer from memory if applicable
         if self.conversation_memory and any(keyword in query.lower() for keyword in ['뭐', '무엇', '어떤', '누구', '어디', '언제', 'what', 'who', 'which', 'where', 'when', '채널']):
             try:
+                print(f"💾 [ROUTE] 저장된 메모리에서 답변 확인 중...")
                 memory_check_prompt = f"""User has stored the following information:
 {json.dumps(self.conversation_memory, ensure_ascii=False, indent=2)}
 
@@ -594,6 +853,7 @@ Answer:"""
         if not any(q_word in query for q_word in ['?', '뭐', '무엇', '어디', '누구', '언제', '어떻게', 'what', 'who', 'where', 'when', 'how']):
             # This might be a statement providing information
             try:
+                print(f"💾 [ROUTE] 정보 저장 시도 중...")
                 result = store_memory.invoke(query)
                 if "정보를 저장했습니다" in result:
                     # Update local memory as well
@@ -628,23 +888,27 @@ Return JSON:"""
             except Exception as e:
                 print(f"Memory storage error: {e}")
         
-        # Simple routing logic
+        # Simple routing logic with tool selection display
         query_lower = query.lower()
         
         # Check for specific tool requests
         if any(word in query_lower for word in ['요약', 'summary', 'summarize']):
+            print(f"📝 [ROUTE] 비디오 요약 도구 선택")
             return summarize_video.invoke("")
         elif any(word in query_lower for word in ['제목', 'title', 'titles']):
+            print(f"🎯 [ROUTE] 제목 생성 도구 선택")
             return generate_titles.invoke("")
         elif any(word in query_lower for word in ['블로그', 'blog', 'post']):
+            print(f"✍️ [ROUTE] 블로그 포스트 작성 도구 선택")
             return write_blog_post.invoke("")
         elif any(word in query_lower for word in ['퀴즈', 'quiz', 'test']):
+            print(f"❓ [ROUTE] 퀴즈 생성 도구 선택")
             return generate_quiz.invoke("")
         elif any(word in query_lower for word in ['핵심', '중요', 'key', 'moments', 'highlights']):
+            print(f"⭐ [ROUTE] 핵심 순간 추출 도구 선택")
             return extract_key_moments.invoke("")
         elif any(word in query_lower for word in ['검색', 'search', '찾아', '기사', '뉴스', '관련', '출처']):
-            # Don't modify the original query, just use it as is for search
-            print(f"DEBUG: Search triggered by query: {query}")
+            print(f"🔍 [ROUTE] 웹 검색 도구 선택")
             
             # If the query is asking for articles or sources, create a better search query
             if any(word in query_lower for word in ['기사', '뉴스', '관련', '출처']):
@@ -676,7 +940,20 @@ Return JSON:"""
                 return "검색할 내용을 구체적으로 알려주세요."
         else:
             # Default to answering questions about the video
+            print(f"🤔 [ROUTE] 비디오 질문 답변 도구 선택")
             result = answer_question.invoke(query)
             # Save metadata after any interaction
             self.save_metadata()
             return result
+    def add_context_to_vector_store(self, summary):
+        """Add context summary to vector store for semantic search."""
+        if self.vector_store and summary:
+            try:
+                context_doc = Document(
+                    page_content=f"비디오 요약: {summary}",
+                    metadata={"type": "context_summary"}
+                )
+                self.vector_store.add_documents([context_doc])
+                print("DEBUG: Added context summary to vector store")
+            except Exception as e:
+                print(f"Warning: Could not add context to vector store: {e}")
